@@ -1,0 +1,830 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY name "Disk Health Monitor">
+  <!ENTITY author "Joshlucpoll">
+  <!ENTITY version "2026.04.29">
+  <!ENTITY description "Real-time disk health overview with SMART data, temps, alerts, and pool/array usage">
+  <!ENTITY category "System Monitoring">
+  <!ENTITY pluginURL "https://raw.githubusercontent.com/Joshlucpoll/disk-health-monitor-unraid-plugin/main/disk-health-monitor.plg">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="6.9"
+  support="https://github.com/Joshlucpoll/disk-health-monitor-unraid-plugin/issues" icon="hdd-o" description="&description;"
+  category="&category;">
+
+  <DESCRIPTION>
+    Disk Health Monitor provides a beautifully styled, comprehensive dashboard directly on your
+    Unraid Main GUI page.
+    It displays real-time health scores, smart attributes, pool and array capacity usage,
+    temperatures, and critical alerts for all your HDDs, SSDs, and NVMe drives.
+  </DESCRIPTION>
+
+  <CHANGES>
+    ###2026.04.29
+    - Initial public release
+    - Real-time disk health dashboard on Unraid Main page
+    - SMART attribute monitoring for HDD, SSD, and NVMe drives
+    - Pool and array capacity/usage display
+    - Temperature monitoring with threshold alerts
+    - Health scoring with OK/Warning/Critical status
+    - Automatic theme adaptation for all Unraid themes
+</CHANGES>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+mkdir -p /usr/local/emhttp/plugins/disk-health-monitor/css
+mkdir -p /usr/local/emhttp/plugins/disk-health-monitor/js
+mkdir -p /usr/local/emhttp/plugins/disk-health-monitor/include
+echo "Directories ready"
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+cat > /usr/local/emhttp/plugins/disk-health-monitor/css/style.css << 'CSSEOF'
+/* Disk Health Monitor
+ * --dhm-* vars are injected at runtime by reading computed styles from
+ * actual Unraid DOM elements, so all themes work automatically.
+ */
+
+/* Outer panel: same background + padding as Unraid's other Main-page sections.
+ * We read the table background colour from a real tablesorter element in JS
+ * and apply it as --dhm-panel-bg. The padding mirrors #content > table margin. */
+#dhm-panel {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  background: var(--dhm-panel-bg, transparent);
+  border-radius: 4px;
+  padding: 12px 16px;
+  margin-top: -32px;
+  margin-bottom: 16px;
+}
+
+#dhm-wrap {
+  width: 100%;
+  min-width: 0;
+}
+
+/* Header row inside the panel */
+.dhm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--dhm-border, rgba(128,128,128,.25));
+  margin-bottom: 10px;
+}
+.dhm-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--dhm-text, inherit);
+}
+.dhm-header-left i { color: var(--dhm-accent, #0066cc); }
+.dhm-refresh-btn {
+  padding: 4px 11px;
+  font-size: 11px;
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.3));
+  border-radius: 3px;
+  background: var(--dhm-row, rgba(128,128,128,.1));
+  color: var(--dhm-text, inherit);
+  cursor: pointer;
+  line-height: 1.4;
+}
+.dhm-refresh-btn:hover { opacity: .8; }
+
+/* Summary / filter pills */
+.dhm-summary {
+  display: flex;
+  gap: 6px;
+  padding: 0 0 10px;
+  flex-wrap: wrap;
+}
+.dhm-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid rgba(128,128,128,.3);
+  color: var(--dhm-text, inherit);
+  background: var(--dhm-row, rgba(128,128,128,.1));
+  cursor: pointer;
+  user-select: none;
+  transition: opacity .15s, box-shadow .15s;
+}
+.dhm-pill:hover    { opacity: .85; }
+.dhm-pill.active   { box-shadow: 0 0 0 2px currentColor; }
+.dhm-pill.inactive { opacity: .35; }
+.dhm-pill .dhm-n   { font-size: 14px; font-weight: 700; margin-right: 2px; }
+.dhm-pill-ok   { background: rgba(40,167,69,.15)  !important; color: #4caf50 !important; border-color: rgba(40,167,69,.4)  !important; }
+.dhm-pill-warn { background: rgba(230,168,23,.15) !important; color: #e6a817 !important; border-color: rgba(230,168,23,.4) !important; }
+.dhm-pill-crit { background: rgba(220,53,69,.15)  !important; color: #f44    !important; border-color: rgba(220,53,69,.4)  !important; }
+
+/* Group block — full width, independent grid per section */
+.dhm-group { width: 100%; margin-bottom: 14px; min-width: 0; }
+.dhm-group:last-child { margin-bottom: 0; }
+.dhm-group.hidden { display: none; }
+
+.dhm-group-header {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--dhm-muted, rgba(128,128,128,.7));
+  padding: 0 0 5px;
+  border-bottom: 1px solid var(--dhm-border, rgba(128,128,128,.2));
+  margin-bottom: 10px;
+}
+
+/* Card grid: each group's own independent grid */
+.dhm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Individual card */
+.dhm-card {
+  box-sizing: border-box;
+  background: var(--dhm-bg, transparent);
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.25));
+  border-left: 4px solid var(--dhm-border, rgba(128,128,128,.25));
+  border-radius: 4px;
+  padding: 11px 12px;
+  transition: box-shadow .15s;
+  min-width: 0;
+}
+.dhm-card:hover  { box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+.dhm-card.hidden { display: none; }
+.dhm-card.dhm-ok   { border-left-color: #28a745; }
+.dhm-card.dhm-warn { border-left-color: #e6a817; }
+.dhm-card.dhm-crit { border-left-color: #dc3545; }
+
+.dhm-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 9px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--dhm-border, rgba(128,128,128,.2));
+}
+.dhm-disk-logical { font-size: 14px; font-weight: 700; color: var(--dhm-text, inherit); word-break: break-word; }
+.dhm-disk-sub     { font-size: 11px; color: var(--dhm-muted, rgba(128,128,128,.8)); margin-top: 2px; word-break: break-all; }
+
+.dhm-badge {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 10px; letter-spacing: .3px;
+  white-space: nowrap; flex-shrink: 0;
+}
+.dhm-badge.dhm-ok   { background: rgba(40,167,69,.2);  color: #4caf50; }
+.dhm-badge.dhm-warn { background: rgba(230,168,23,.2); color: #e6a817; }
+.dhm-badge.dhm-crit { background: rgba(220,53,69,.2);  color: #f44336; }
+
+.dhm-metrics {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 6px; margin-bottom: 9px;
+}
+.dhm-metric {
+  background: var(--dhm-row, rgba(128,128,128,.08));
+  border-radius: 3px; padding: 6px 8px;
+  border-left: 2px solid var(--dhm-accent, #0066cc);
+  min-width: 0;
+}
+.dhm-metric-label {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .4px;
+  font-weight: 600; color: var(--dhm-muted, rgba(128,128,128,.8)); margin-bottom: 2px;
+}
+.dhm-metric-value { font-size: 13px; font-weight: 700; color: var(--dhm-text, inherit); word-break: break-word; }
+.dhm-metric-unit  { font-size: 10px; color: var(--dhm-muted, rgba(128,128,128,.7)); margin-left: 1px; }
+
+.dhm-health-wrap { margin-bottom: 9px; }
+.dhm-health-top {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: var(--dhm-muted, rgba(128,128,128,.8)); margin-bottom: 3px;
+}
+.dhm-health-top strong { color: var(--dhm-text, inherit); }
+.dhm-bar {
+  width: 100%; height: 5px;
+  background: var(--dhm-border, rgba(128,128,128,.25));
+  border-radius: 3px; overflow: hidden;
+}
+.dhm-bar-fill { height: 100%; border-radius: 3px; transition: width .4s; }
+.dhm-bar-fill.dhm-ok   { background: #28a745; }
+.dhm-bar-fill.dhm-warn { background: #e6a817; }
+.dhm-bar-fill.dhm-crit { background: #dc3545; }
+
+.dhm-smart { border-top: 1px solid var(--dhm-border, rgba(128,128,128,.2)); padding-top: 7px; margin-top: 2px; }
+.dhm-smart-title {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .4px;
+  font-weight: 700; color: var(--dhm-muted, rgba(128,128,128,.6)); margin-bottom: 4px;
+}
+.dhm-smart-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 11px; padding: 2px 0;
+  border-bottom: 1px solid var(--dhm-border, rgba(128,128,128,.1));
+  color: var(--dhm-muted, rgba(128,128,128,.8));
+}
+.dhm-smart-row:last-child { border-bottom: none; }
+.dhm-smart-row span:last-child { font-weight: 600; color: var(--dhm-text, inherit); text-align: right; }
+
+.dhm-alert {
+  margin-top: 6px; padding: 5px 8px; border-radius: 3px;
+  font-size: 11px; border-left: 3px solid; line-height: 1.4; word-break: break-word;
+}
+.dhm-alert-warning { background: rgba(230,168,23,.15); border-color: #e6a817; color: #e6a817; }
+.dhm-alert-danger  { background: rgba(220,53,69,.12);  border-color: #dc3545; color: #f55; }
+.dhm-alert-info    { background: rgba(23,162,184,.12); border-color: #17a2b8; color: #5bc0de; }
+
+.dhm-state {
+  padding: 20px; text-align: center;
+  color: var(--dhm-muted, rgba(128,128,128,.7)); font-size: 13px;
+}
+.dhm-state.dhm-error { color: #f55; }
+
+@media (max-width: 1200px) { .dhm-grid { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); } }
+@media (max-width: 900px) { .dhm-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); } }
+@media (max-width: 600px) { .dhm-grid { grid-template-columns: 1fr; } .dhm-metrics { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 400px) { .dhm-metrics { grid-template-columns: 1fr; } }
+CSSEOF
+echo "CSS written"
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+cat > /usr/local/emhttp/plugins/disk-health-monitor/js/app.js << 'JSEOF'
+(function () {
+
+  /* Theme vars: read from actual Unraid DOM elements */
+  function applyThemeVars() {
+    var root   = document.documentElement;
+    var body   = document.body;
+    var bodyBg = getComputedStyle(body).backgroundColor;
+
+    /* Panel background: read from an existing tablesorter table — this is what
+     * Array Operation, Pool Devices etc. use. Fall back to a slightly lighter
+     * version of the body background if not found. */
+    var panelBg = null;
+    var tbl = document.querySelector('table.tablesorter tbody');
+    if (tbl) panelBg = getComputedStyle(tbl).backgroundColor;
+    if (!panelBg || panelBg === 'rgba(0, 0, 0, 0)') {
+      panelBg = isDark(bodyBg) ? darken(bodyBg, 6) : lighten(bodyBg, 5);
+    }
+
+    /* Card background: slightly different from panel */
+    var cardBg = isDark(bodyBg) ? lighten(bodyBg, 6) : bodyBg;
+
+    /* Row/metric tile background */
+    var rowBg = isDark(bodyBg) ? lighten(bodyBg, 3) : darken(bodyBg, 3);
+
+    /* Border */
+    var borderColor = 'rgba(128,128,128,0.2)';
+    var tr = document.querySelector('table.tablesorter tr, #content tr');
+    if (tr) {
+      var b = getComputedStyle(tr).borderBottomColor;
+      if (b && b !== 'rgba(0, 0, 0, 0)') borderColor = b;
+    }
+
+    /* Text */
+    var textColor  = getComputedStyle(body).color;
+    var mutedColor = textColor.replace('rgb(','rgba(').replace(')',', 0.55)');
+    if (mutedColor === textColor) mutedColor = 'rgba(128,128,128,0.7)';
+
+    /* Accent */
+    var accentColor = '#0066cc';
+    var a = document.querySelector('#menu a, a.item, nav a, .navigation a');
+    if (a) { var ac = getComputedStyle(a).color; if (ac && ac !== 'rgba(0, 0, 0, 0)') accentColor = ac; }
+
+    root.style.setProperty('--dhm-panel-bg', panelBg);
+    root.style.setProperty('--dhm-bg',       cardBg);
+    root.style.setProperty('--dhm-row',      rowBg);
+    root.style.setProperty('--dhm-border',   borderColor);
+    root.style.setProperty('--dhm-text',     textColor);
+    root.style.setProperty('--dhm-muted',    mutedColor);
+    root.style.setProperty('--dhm-accent',   accentColor);
+  }
+
+  function isDark(rgb) {
+    var m = rgb.match(/(\d+),\s*(\d+),\s*(\d+)/);
+    return m ? (0.299*m[1] + 0.587*m[2] + 0.114*m[3]) < 100 : false;
+  }
+  function lighten(rgb, p) {
+    var m = rgb.match(/(\d+),\s*(\d+),\s*(\d+)/);
+    return m ? 'rgb('+Math.min(255,+m[1]+p)+','+Math.min(255,+m[2]+p)+','+Math.min(255,+m[3]+p)+')' : rgb;
+  }
+  function darken(rgb, p) {
+    var m = rgb.match(/(\d+),\s*(\d+),\s*(\d+)/);
+    return m ? 'rgb('+Math.max(0,+m[1]-p)+','+Math.max(0,+m[2]-p)+','+Math.max(0,+m[3]-p)+')' : rgb;
+  }
+
+  /* Helpers */
+  function fmtBytes(b) {
+    if (!b || b <= 0) return '0\u00a0B';
+    var u = ['B','KB','MB','GB','TB'], i = Math.floor(Math.log(b)/Math.log(1024));
+    return (b/Math.pow(1024,i)).toFixed(1)+'\u00a0'+u[i];
+  }
+  function fmtHours(h) {
+    if (!h) return 'N/A';
+    var d = Math.floor(h/24);
+    return d > 365 ? Math.floor(d/365)+'y\u00a0'+Math.floor((d%365)/30)+'m' : d > 0 ? d+'d' : h+'h';
+  }
+  function cls(s) { return s >= 85 ? 'dhm-ok' : s >= 60 ? 'dhm-warn' : 'dhm-crit'; }
+  function lbl(s) { return s >= 85 ? 'Healthy' : s >= 60 ? 'Warning' : 'Critical'; }
+
+  /* Natural sort for disk names within a group */
+  function naturalSort(a, b) {
+    var re = /(\d+)|(\D+)/g;
+    var pa = String(a.sortKey||a.logicalName||a.name).match(re)||[];
+    var pb = String(b.sortKey||b.logicalName||b.name).match(re)||[];
+    for (var i = 0; i < Math.min(pa.length, pb.length); i++) {
+      var na = parseInt(pa[i]), nb = parseInt(pb[i]);
+      var ia = !isNaN(na), ib = !isNaN(nb);
+      if (ia && ib) { if (na !== nb) return na - nb; }
+      else { var c = pa[i].localeCompare(pb[i]); if (c) return c; }
+    }
+    return pa.length - pb.length;
+  }
+
+  /* Filter state */
+  var activeFilter = null;
+
+  function applyFilter() {
+    document.querySelectorAll('.dhm-card').forEach(function(c) {
+      if (!activeFilter) c.classList.remove('hidden');
+      else c.classList.toggle('hidden', !c.classList.contains(activeFilter));
+    });
+    document.querySelectorAll('.dhm-group').forEach(function(g) {
+      var any = false;
+      g.querySelectorAll('.dhm-card').forEach(function(c){ if (!c.classList.contains('hidden')) any = true; });
+      g.classList.toggle('hidden', !any);
+    });
+    document.querySelectorAll('.dhm-pill[data-filter]').forEach(function(p) {
+      var f = p.getAttribute('data-filter');
+      if (!activeFilter) { p.classList.remove('active','inactive'); }
+      else if (f === activeFilter) { p.classList.add('active'); p.classList.remove('inactive'); }
+      else { p.classList.add('inactive'); p.classList.remove('active'); }
+    });
+  }
+
+  window.dhmPillClick = function(filter) {
+    activeFilter = (activeFilter === filter) ? null : filter;
+    applyFilter();
+  };
+
+  /* Card HTML */
+  function cardHtml(d) {
+    var sc = d.healthScore||0, c = cls(sc);
+    var logical = d.logicalName || ('/dev/'+d.name);
+    var sub = '/dev/'+d.name+(d.model && d.model!=='Unknown' ? ' \u2014 '+d.model : '');
+    var attrHtml = '';
+    if (d.smartAttributes) {
+      Object.keys(d.smartAttributes).slice(0,5).forEach(function(k){
+        var lbl2 = k.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase();});
+        attrHtml += '<div class="dhm-smart-row"><span>'+lbl2+'</span><span>'+d.smartAttributes[k]+'</span></div>';
+      });
+    }
+    var alertHtml = '';
+    (d.alerts||[]).forEach(function(a){
+      alertHtml += '<div class="dhm-alert dhm-alert-'+a.level+'"><strong>'+a.title+':</strong> '+a.message+'</div>';
+    });
+    var usedStr = d.capacity > 0 ? fmtBytes(d.used||0)+' <span class="dhm-metric-unit">('+( d.usagePercent||0)+'%)</span>' : 'N/A';
+    var tempStr = d.temperature != null ? d.temperature+'<span class="dhm-metric-unit">\u00b0C</span>' : 'N/A';
+    return '<div class="dhm-card '+c+'">'
+      +'<div class="dhm-card-head">'
+      +  '<div><div class="dhm-disk-logical">'+logical+'</div><div class="dhm-disk-sub">'+sub+'</div></div>'
+      +  '<span class="dhm-badge '+c+'">'+lbl(sc)+'</span>'
+      +'</div>'
+      +'<div class="dhm-metrics">'
+      +  '<div class="dhm-metric"><div class="dhm-metric-label">Capacity</div><div class="dhm-metric-value">'+fmtBytes(d.capacity||0)+'</div></div>'
+      +  '<div class="dhm-metric"><div class="dhm-metric-label">Used</div><div class="dhm-metric-value">'+usedStr+'</div></div>'
+      +  '<div class="dhm-metric"><div class="dhm-metric-label">Temperature</div><div class="dhm-metric-value">'+tempStr+'</div></div>'
+      +  '<div class="dhm-metric"><div class="dhm-metric-label">Power-On</div><div class="dhm-metric-value">'+fmtHours(d.powerOnHours)+'</div></div>'
+      +'</div>'
+      +'<div class="dhm-health-wrap">'
+      +  '<div class="dhm-health-top"><span>Health Score</span><strong>'+sc+'%</strong></div>'
+      +  '<div class="dhm-bar"><div class="dhm-bar-fill '+c+'" style="width:'+sc+'%"></div></div>'
+      +'</div>'
+      +(attrHtml?'<div class="dhm-smart"><div class="dhm-smart-title">SMART Attributes</div>'+attrHtml+'</div>':'')
+      +alertHtml
+      +'</div>';
+  }
+
+  /* Render — one .dhm-group per section, each with its own grid */
+  function render(data) {
+    var wrap = document.getElementById('dhm-wrap');
+    if (!wrap) return;
+    if (!data.length) { wrap.innerHTML='<div class="dhm-state">No physical disks detected.</div>'; return; }
+
+    // Group, preserving server-defined order
+    var order = [], map = {};
+    data.forEach(function(d){
+      var key = d.groupKey || 'unassigned';
+      if (!map[key]) { map[key]={label:d.groupLabel||'Unassigned Devices', disks:[]}; order.push(key); }
+      map[key].disks.push(d);
+    });
+
+    // Sort disks within each group naturally by logicalName
+    order.forEach(function(key){ map[key].disks.sort(naturalSort); });
+
+    var html = '';
+    order.forEach(function(key){
+      var g = map[key];
+      html += '<div class="dhm-group" data-group="'+key+'">'
+        +'<div class="dhm-group-header">'+g.label+'</div>'
+        +'<div class="dhm-grid">'+g.disks.map(cardHtml).join('')+'</div>'
+        +'</div>';
+    });
+    wrap.innerHTML = html;
+
+    var ok=0,warn=0,crit=0;
+    data.forEach(function(d){ var c=cls(d.healthScore||0); if(c==='dhm-ok')ok++; else if(c==='dhm-warn')warn++; else crit++; });
+    var s=function(id,v){var el=document.getElementById(id);if(el)el.textContent=v;};
+    s('dhm-total',data.length); s('dhm-healthy',ok); s('dhm-warning',warn); s('dhm-critical',crit);
+    applyFilter();
+  }
+
+  function load() {
+    var wrap = document.getElementById('dhm-wrap');
+    if (!wrap) return;
+    applyThemeVars();
+    wrap.innerHTML='<div class="dhm-state"><i class="fa fa-spinner fa-spin"></i> Loading disk data...</div>';
+    var x = new XMLHttpRequest();
+    x.open('GET','/plugins/disk-health-monitor/include/api.php?_='+Date.now());
+    x.onload=function(){
+      if(x.status===200){try{render(JSON.parse(x.responseText));}catch(e){wrap.innerHTML='<div class="dhm-state dhm-error">Parse error: '+e.message+'</div>';}}
+      else{wrap.innerHTML='<div class="dhm-state dhm-error">API error HTTP '+x.status+'</div>';}
+    };
+    x.onerror=function(){wrap.innerHTML='<div class="dhm-state dhm-error">Cannot reach API.</div>';};
+    x.send();
+  }
+
+  window.dhmRefresh = load;
+  if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',load);}else{load();}
+})();
+JSEOF
+echo "JS written"
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+cat > /usr/local/emhttp/plugins/disk-health-monitor/include/api.php << 'PHPEOF'
+<?php
+header('Content-Type: application/json');
+header('Cache-Control: no-cache');
+
+function r($c){ exec($c.' 2>/dev/null',$o); return $o; }
+
+/*
+ * Parse /var/local/emhttp/disks.ini
+ *
+ * KEY FIX: Multiple drives in the same pool have DIFFERENT section names
+ * (e.g. [heartofgold], [heartofgold_2], [heartofgold_3]) but the SAME
+ * name= value ("heartofgold"). We group by name+type, not by section.
+ *
+ * Stanza fields we care about:
+ *   name=    human name ("Disk 1", "Parity", "heartofgold", "Flash")
+ *   device=  block device basename ("sda", "nvme0n1")
+ *   type=    "Parity" | "Data" | "Cache" | "Flash"
+ */
+function buildDeviceMap() {
+  $map  = [];
+  $path = '/var/local/emhttp/disks.ini';
+  if (!file_exists($path)) return $map;
+  $ini = @parse_ini_file($path, true, INI_SCANNER_RAW);
+  if (!$ini) return $map;
+
+  foreach ($ini as $section => $v) {
+    $dev      = basename(trim($v['device'] ?? '', '"'));
+    $name     = trim($v['name']   ?? '', '"');
+    $type     = strtolower(trim($v['type']  ?? '', '"'));
+    if ($dev === '') continue;
+
+    switch ($type) {
+      case 'parity':
+        $groupKey   = 'array';
+        $groupLabel = 'Array';
+        $poolName   = null;
+        break;
+      case 'data':
+        $groupKey   = 'array';
+        $groupLabel = 'Array';
+        $poolName   = null;
+        break;
+      case 'cache':
+        // Unraid appends a number for multidevice pools (e.g., heartofgold, heartofgold2, heartofgold3).
+        // Strip trailing digits so they are grouped under the same pool name.
+        $rawPool    = $name ?: $section;
+        $poolName   = preg_replace('/\d+$/', '', $rawPool);
+        $groupKey   = 'pool_'.strtolower(preg_replace('/\s+/','-',$poolName));
+        $groupLabel = 'Pool: '.$poolName;
+        break;
+      case 'flash':
+        $groupKey   = 'flash';
+        $groupLabel = 'Flash / Boot';
+        $poolName   = null;
+        break;
+      default:
+        $groupKey   = 'unassigned';
+        $groupLabel = 'Unassigned Devices';
+        $poolName   = null;
+    }
+
+    $map[$dev] = [
+      'logicalName' => $name ?: ('/dev/'.$dev),
+      'groupKey'    => $groupKey,
+      'groupLabel'  => $groupLabel,
+      'group'       => ($type === 'parity' || $type === 'data') ? 'array'
+                     : ($type === 'cache' ? 'pool'
+                     : ($type === 'flash' ? 'flash' : 'unassigned')),
+      'poolName'    => $poolName,
+    ];
+  }
+  return $map;
+}
+
+/* Disk model */
+function diskModel($d) {
+  foreach (r("smartctl -i $d") as $l) {
+    if (preg_match('/(?:Device Model|Model Number)\s*:\s*(.+)/i',$l,$m)) return trim($m[1]);
+    if (preg_match('/Product\s*:\s*(.+)/i',$l,$m)) return trim($m[1]);
+  }
+  $sys='/sys/block/'.basename($d).'/device/model';
+  return file_exists($sys) ? trim(file_get_contents($sys)) : 'Unknown';
+}
+
+/* SMART — handles ATA (numbered attribute table) and NVMe (plain-text fields) */
+function smartData($d) {
+  $r=['temperature'=>null,'powerOnHours'=>0,'reallocSectors'=>0,'pendingSectors'=>0,
+      'cmdTimeout'=>0,'uncorrectable'=>0,'criticalWarning'=>0,'status'=>'unknown','attrs'=>[]];
+  foreach (r("smartctl -a $d") as $l) {
+    // Health: anchor to the specific overall-health line only
+    if (preg_match('/SMART overall-health self-assessment test result\s*:\s*(\w+)/i',$l,$m))
+      $r['status'] = (strtoupper(trim($m[1]))==='PASSED') ? 'passed' : 'failed';
+    // NVMe plain-text
+    if (preg_match('/^Temperature\s*:\s*([\d,]+)\s*Celsius/i',$l,$m))
+      $r['temperature']=(int)str_replace(',','',$m[1]);
+    if (preg_match('/^Power On Hours\s*:\s*([\d,]+)/i',$l,$m))
+      $r['powerOnHours']=(int)str_replace(',','',$m[1]);
+    if (preg_match('/^Critical Warning\s*:\s*(0x[\da-fA-F]+|\d+)/i',$l,$m))
+      $r['criticalWarning']=hexdec($m[1]);
+    // ATA attribute table
+    if (preg_match('/^\s*(\d+)\s+(\S+)\s+\S+\s+\d+\s+\d+\s+\d+\s+\S+\s+\S+\s+\S+\s+(\d+)/',$l,$m)) {
+      $id=(int)$m[1]; $name=$m[2]; $val=(int)$m[3];
+      if($id===190||$id===194) $r['temperature']=$val;
+      if($id===9)              $r['powerOnHours']=$val;
+      if($id===5)              $r['reallocSectors']=$val;
+      if($id===197)            $r['pendingSectors']=$val;
+      if($id===188)            $r['cmdTimeout']=$val;
+      if($id===198)            $r['uncorrectable']=$val;
+      $r['attrs'][strtolower(str_replace([' ','-'],'_',$name))]=$val;
+    }
+  }
+  return $r;
+}
+
+/* Usage — mount point depends on disk type */
+function diskUsage($devBasename, $group, $poolName, $logicalName) {
+  // Check Unraid's /var/local/emhttp/disks.ini which holds usage info
+  $iniPath = '/var/local/emhttp/disks.ini';
+  if (file_exists($iniPath)) {
+    $ini = @parse_ini_file($iniPath, true, INI_SCANNER_RAW);
+    if ($ini) {
+      $sect = null;
+      // Find the specific drive
+      foreach ($ini as $k => $v) {
+        if (!empty($v['device']) && trim($v['device'], '"') === $devBasename) {
+          $sect = $v;
+          break;
+        }
+      }
+      
+      // If this drive lacks fsSize but belongs to a pool, Unraid often only stores fsSize 
+      // on the first (head) drive of the pool. Let's find the head drive's stats for this pool.
+      if ((!$sect || !isset($sect['fsSize']) || $sect['fsSize'] === "") && $group === 'pool' && $poolName) {
+        foreach ($ini as $v) {
+           $n = trim($v['name'] ?? '', '"');
+           $rawPool = preg_replace('/\d+$/', '', $n ?: 'none');
+           if ($rawPool === $poolName && isset($v['fsSize']) && $v['fsSize'] !== "") {
+              $sect = $v;
+              break;
+           }
+        }
+      }
+
+      if ($sect && isset($sect['fsSize']) && isset($sect['fsFree']) && $sect['fsSize'] !== "") {
+        $fst = trim($sect['fsSize'], '"');
+        $ffr = trim($sect['fsFree'], '"');
+        if (is_numeric($fst) && is_numeric($ffr) && (int)$fst > 0) {
+            $fsize = (int)$fst * 1024;
+            $ffree = (int)$ffr * 1024;
+            return [$fsize, $fsize - $ffree];
+        }
+      }
+    }
+  }
+
+  $mps = [];
+  if ($group === 'array') {
+    if (stripos($logicalName,'parity')!==false) return [0,0]; // parity not mounted
+    $slug = strtolower(preg_replace('/\s+/','',$logicalName)); // "Disk 1" -> "disk1"
+    $mps[] = '/mnt/'.$slug;
+  } elseif ($group === 'pool' && $poolName) {
+    $mps[] = '/mnt/'.strtolower($poolName);
+  } elseif ($group === 'flash') {
+    $mps[] = '/boot';
+  }
+  foreach ($mps as $mp) {
+    if (!is_dir($mp)) continue;
+    foreach (r("df -B1 -P ".escapeshellarg($mp)) as $i=>$l) {
+      if($i===0) continue;
+      $p=preg_split('/\s+/',trim($l));
+      if(count($p)>=3) return[(int)$p[1],(int)$p[2]];
+    }
+  }
+  // Generic fallback via partition
+  $dev='/dev/'.$devBasename;
+  foreach([1,2] as $n) {
+    $part=$dev.$n; if(!file_exists($part)) continue;
+    foreach(r("df -B1 -P ".escapeshellarg($part)) as $i=>$l) {
+      if($i===0) continue; $p=preg_split('/\s+/',trim($l));
+      if(count($p)>=3) return[(int)$p[1],(int)$p[2]];
+    }
+  }
+  return [0,0];
+}
+
+function healthScore($sm) {
+  $s=100; $t=$sm['temperature'];
+  if($t!==null){if($t>65)$s-=20;elseif($t>55)$s-=10;elseif($t>50)$s-=5;}
+  if($sm['reallocSectors']>0) $s-=min(30,$sm['reallocSectors']);
+  if($sm['pendingSectors']>0) $s-=min(40,$sm['pendingSectors']*5);
+  if($sm['uncorrectable']>0)  $s-=15;
+  if($sm['cmdTimeout']>0)     $s-=10;
+  if($sm['criticalWarning']>0)$s-=20;
+  if($sm['powerOnHours']>0)   $s-=min(20,(int)($sm['powerOnHours']/10000)*2);
+  if($sm['status']==='failed')$s=min(50,$s);
+  return max(0,min(100,$s));
+}
+
+function buildAlerts($sm) {
+  $a=[]; $t=$sm['temperature'];
+  if($t!==null){
+    if($t>65)     $a[]=['level'=>'danger', 'title'=>'Critical Temperature','message'=>"Disk is {$t}\xc2\xb0C \xe2\x80\x94 immediate attention needed."];
+    elseif($t>55) $a[]=['level'=>'warning','title'=>'High Temperature',    'message'=>"Running at {$t}\xc2\xb0C. Check airflow."];
+  }
+  if($sm['criticalWarning']>0) $a[]=['level'=>'danger', 'title'=>'NVMe Critical Warning',  'message'=>'Critical Warning byte: 0x'.dechex($sm['criticalWarning']).'.'];
+  if($sm['reallocSectors']>0)  $a[]=['level'=>'danger', 'title'=>'Reallocated Sectors',    'message'=>"{$sm['reallocSectors']} sectors reallocated. Plan replacement."];
+  if($sm['pendingSectors']>0)  $a[]=['level'=>'danger', 'title'=>'Pending Sectors',        'message'=>"{$sm['pendingSectors']} sectors pending reallocation."];
+  if($sm['uncorrectable']>0)   $a[]=['level'=>'danger', 'title'=>'Uncorrectable Errors',   'message'=>"{$sm['uncorrectable']} uncorrectable read errors."];
+  if($sm['cmdTimeout']>0)      $a[]=['level'=>'warning','title'=>'Command Timeouts',       'message'=>"{$sm['cmdTimeout']} command timeouts reported."];
+  if($sm['powerOnHours']>50000)$a[]=['level'=>'info',   'title'=>'High Mileage',           'message'=>round($sm['powerOnHours']/8760,1).' years of runtime.'];
+  if($sm['status']==='failed') $a[]=['level'=>'danger', 'title'=>'SMART Health FAILED',    'message'=>'Disk failed SMART health check. Replace immediately.'];
+  return $a;
+}
+
+/* ── Main ── */
+$deviceMap = buildDeviceMap();
+
+$rawLines=[]; exec('lsblk -dpb -o NAME,SIZE,TYPE 2>/dev/null',$rawLines);
+
+$disks=[];
+foreach($rawLines as $line){
+  $p=preg_split('/\s+/',trim($line),3);
+  if(count($p)<3||$p[2]!=='disk') continue;
+  $name=basename($p[0]);
+  if(preg_match('/^(loop|dm-|sr|zd)/',$name)) continue;
+
+  $info        = $deviceMap[$name] ?? null;
+  $logicalName = $info['logicalName'] ?? ('/dev/'.$name);
+  $group       = $info['group']       ?? 'unassigned';
+  $groupKey    = $info['groupKey']    ?? 'unassigned';
+  $groupLabel  = $info['groupLabel']  ?? 'Unassigned Devices';
+  $poolName    = $info['poolName']    ?? null;
+
+  $sm=smartData($p[0]);
+  [$cap,$used]=diskUsage($name,$group,$poolName,$logicalName);
+  $sc=healthScore($sm);
+  $st=$sc>=85?'healthy':($sc>=60?'warning':'critical');
+  $usagePercent = $cap>0 ? round($used/$cap*100) : 0;
+  $physCapacity = (int)$p[1];
+  $proportionalUsed = ($group === 'pool' || $group === 'array') ? (int)round($physCapacity * ($usagePercent / 100)) : $used;
+
+  // sortKey for natural ordering within group
+  // Array: parity=0, disk N=N; Pool: by device name; others: by logicalName
+  $sortKey = $logicalName;
+  if($group==='array'){
+    if(stripos($logicalName,'parity')===0) $sortKey='000_'.$logicalName;
+    else $sortKey=preg_replace_callback('/(\d+)/',function($m){return str_pad($m[1],6,'0',STR_PAD_LEFT);},$logicalName);
+  }
+
+  $disks[]=[
+    'name'           =>$name,
+    'logicalName'    =>$logicalName,
+    'sortKey'        =>$sortKey,
+    'group'          =>$group,
+    'groupKey'       =>$groupKey,
+    'groupLabel'     =>$groupLabel,
+    'model'          =>diskModel($p[0]),
+    'capacity'       =>$physCapacity,
+    'used'           =>$proportionalUsed,
+    'usagePercent'   =>$usagePercent,
+    'temperature'    =>$sm['temperature'],
+    'powerOnHours'   =>$sm['powerOnHours'],
+    'healthScore'    =>$sc,
+    'status'         =>$st,
+    'smartAttributes'=>array_slice($sm['attrs'],0,8,true),
+    'alerts'         =>buildAlerts($sm),
+  ];
+}
+
+// Primary sort: group order, secondary: sortKey (handled in JS naturalSort)
+$groupOrder=['array'=>0,'pool'=>1,'flash'=>2,'unassigned'=>3];
+usort($disks,function($a,$b) use($groupOrder){
+  $ga=$groupOrder[$a['group']]??9;
+  $gb=$groupOrder[$b['group']]??9;
+  if($ga!==$gb) return $ga-$gb;
+  // Within same group, sort by sortKey
+  return strnatcasecmp($a['sortKey'],$b['sortKey']);
+});
+
+echo json_encode($disks,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);
+PHPEOF
+echo "API written"
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+cat > /usr/local/emhttp/plugins/disk-health-monitor/DiskHealth.page << 'PAGEEOF'
+Menu="Main:6"
+Title="Disk Health"
+Tag="fa-hdd"
+---
+
+<div id="dhm-panel">
+  <link rel="stylesheet" href="/plugins/disk-health-monitor/css/style.css">
+  <div class="dhm-header">
+    <div class="dhm-header-left">
+      <i class="fa fa-hdd-o"></i>
+      <span>Disk Health Monitor</span>
+    </div>
+    <button type="button" class="dhm-refresh-btn" onclick="window.dhmRefresh && window.dhmRefresh()">
+      <i class="fa fa-refresh"></i> Refresh
+    </button>
+  </div>
+
+  <div class="dhm-summary">
+    <span class="dhm-pill" data-filter="" onclick="window.dhmPillClick(null)">
+      <i class="fa fa-hdd-o"></i><span class="dhm-n" id="dhm-total">-</span>Total
+    </span>
+    <span class="dhm-pill dhm-pill-ok" data-filter="dhm-ok" onclick="window.dhmPillClick('dhm-ok')">
+      <i class="fa fa-check-circle"></i><span class="dhm-n" id="dhm-healthy">-</span>Healthy
+    </span>
+    <span class="dhm-pill dhm-pill-warn" data-filter="dhm-warn" onclick="window.dhmPillClick('dhm-warn')">
+      <i class="fa fa-exclamation-triangle"></i><span class="dhm-n" id="dhm-warning">-</span>Warning
+    </span>
+    <span class="dhm-pill dhm-pill-crit" data-filter="dhm-crit" onclick="window.dhmPillClick('dhm-crit')">
+      <i class="fa fa-times-circle"></i><span class="dhm-n" id="dhm-critical">-</span>Critical
+    </span>
+  </div>
+
+  <div id="dhm-wrap">
+    <div class="dhm-state"><i class="fa fa-spinner fa-spin"></i> Loading...</div>
+  </div>
+</div>
+
+<script src="/plugins/disk-health-monitor/js/app.js"></script>
+PAGEEOF
+echo "Page written"
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+chmod -R 755 /usr/local/emhttp/plugins/disk-health-monitor
+find /usr/local/emhttp/plugins/disk-health-monitor -type f -exec chmod 644 {} \;
+if ! command -v smartctl >/dev/null 2>&1; then
+  installplug smartmontools 2>/dev/null || pacman -S --noconfirm smartmontools 2>/dev/null || true
+fi
+echo "Disk Health Monitor v2026.04.29 installed."
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash" Method="remove">
+    <INLINE><![CDATA[
+rm -rf /usr/local/emhttp/plugins/disk-health-monitor
+echo "Disk Health Monitor removed."
+]]></INLINE>
+  </FILE>
+
+</PLUGIN>
