@@ -47,6 +47,12 @@
 mkdir -p /usr/local/emhttp/plugins/disk-health-monitor/css
 mkdir -p /usr/local/emhttp/plugins/disk-health-monitor/js
 mkdir -p /usr/local/emhttp/plugins/disk-health-monitor/include
+mkdir -p /var/local/emhttp/plugins/disk-health-monitor
+mkdir -p /boot/config/plugins/disk-health-monitor
+# Write default config only if it doesn't already exist
+if [ ! -f /boot/config/plugins/disk-health-monitor/settings.cfg ]; then
+  echo "RETENTION_DAYS=90" > /boot/config/plugins/disk-health-monitor/settings.cfg
+fi
 echo "Directories ready"
 ]]></INLINE>
   </FILE>
@@ -389,6 +395,61 @@ cat > /usr/local/emhttp/plugins/disk-health-monitor/css/style.css << 'CSSEOF'
   text-align: center;
   padding: 20px;
   font-size: 12px;
+  color: var(--dhm-muted, rgba(128,128,128,.7));
+}
+
+/* Settings panel */
+.dhm-settings-btn {
+  padding: 4px 9px;
+  font-size: 11px;
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.3));
+  border-radius: 3px;
+  background: var(--dhm-row, rgba(128,128,128,.1));
+  color: var(--dhm-muted, rgba(128,128,128,.8));
+  cursor: pointer;
+  line-height: 1.4;
+  margin-left: 4px;
+}
+.dhm-settings-btn:hover { opacity: .8; }
+.dhm-settings-panel {
+  display: none;
+  background: var(--dhm-row, rgba(128,128,128,.08));
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.2));
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.dhm-settings-panel.open { display: block; }
+.dhm-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.dhm-settings-label { color: var(--dhm-text, inherit); font-weight: 600; }
+.dhm-settings-input {
+  width: 70px;
+  padding: 3px 6px;
+  font-size: 12px;
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.3));
+  border-radius: 3px;
+  background: var(--dhm-bg, transparent);
+  color: var(--dhm-text, inherit);
+  text-align: center;
+}
+.dhm-settings-save {
+  padding: 3px 10px;
+  font-size: 11px;
+  border: 1px solid var(--dhm-accent, #0066cc);
+  border-radius: 3px;
+  background: var(--dhm-accent, #0066cc);
+  color: #fff;
+  cursor: pointer;
+}
+.dhm-settings-save:hover { opacity: .85; }
+.dhm-settings-note {
+  font-size: 11px;
   color: var(--dhm-muted, rgba(128,128,128,.7));
 }
 CSSEOF
@@ -790,6 +851,63 @@ cat > /usr/local/emhttp/plugins/disk-health-monitor/js/app.js << 'JSEOF'
     x.send();
   }
 
+  /* ── Settings panel ── */
+
+  window.dhmToggleSettings = function() {
+    var panel = document.getElementById('dhm-settings-panel');
+    if (!panel) return;
+    panel.classList.toggle('open');
+    if (panel.classList.contains('open')) loadSettingsValues();
+  };
+
+  function loadSettingsValues() {
+    var x = new XMLHttpRequest();
+    x.open('GET', '/plugins/disk-health-monitor/include/settings.php?_='+Date.now());
+    x.onload = function() {
+      if (x.status !== 200) return;
+      var data; try { data = JSON.parse(x.responseText); } catch(e){ return; }
+      var inp = document.getElementById('dhm-retention-input');
+      if (inp && data.retentionDays) inp.value = data.retentionDays;
+    };
+    x.send();
+    // Also fetch DB row count for the info line
+    var y = new XMLHttpRequest();
+    y.open('GET', '/plugins/disk-health-monitor/include/history.php?info=1&_='+Date.now());
+    y.onload = function() {
+      if (y.status !== 200) return;
+      var data; try { data = JSON.parse(y.responseText); } catch(e){ return; }
+      var el = document.getElementById('dhm-db-info');
+      if (el && data.rowCount !== undefined) {
+        el.textContent = data.rowCount.toLocaleString() + ' snapshot rows';
+      }
+    };
+    y.send();
+  }
+
+  window.dhmSaveSettings = function() {
+    var inp = document.getElementById('dhm-retention-input');
+    var msg = document.getElementById('dhm-settings-msg');
+    if (!inp) return;
+    var days = parseInt(inp.value, 10);
+    if (isNaN(days) || days < 1 || days > 3650) {
+      if (msg) { msg.textContent = 'Enter 1–3650 days.'; msg.style.color = '#f44336'; }
+      return;
+    }
+    if (msg) { msg.textContent = 'Saving…'; msg.style.color = ''; }
+    var x = new XMLHttpRequest();
+    x.open('POST', '/plugins/disk-health-monitor/include/settings.php');
+    x.setRequestHeader('Content-Type', 'application/json');
+    x.onload = function() {
+      if (x.status === 200) {
+        if (msg) { msg.textContent = 'Saved.'; msg.style.color = '#28a745'; setTimeout(function(){ if(msg) msg.textContent=''; }, 2500); }
+      } else {
+        if (msg) { msg.textContent = 'Error saving.'; msg.style.color = '#f44336'; }
+      }
+    };
+    x.onerror = function() { if (msg) { msg.textContent = 'Network error.'; msg.style.color = '#f44336'; } };
+    x.send(JSON.stringify({ retentionDays: days }));
+  };
+
   window.dhmRefresh = load;
   if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',load);}else{load();}
 })();
@@ -1110,9 +1228,25 @@ Tag="fa-hdd"
       <i class="fa fa-hdd-o"></i>
       <span>Disk Health Monitor</span>
     </div>
-    <button type="button" class="dhm-refresh-btn" onclick="window.dhmRefresh && window.dhmRefresh()">
-      <i class="fa fa-refresh"></i> Refresh
-    </button>
+    <div style="display:flex;gap:4px;align-items:center">
+      <button type="button" class="dhm-refresh-btn" onclick="window.dhmRefresh && window.dhmRefresh()">
+        <i class="fa fa-refresh"></i> Refresh
+      </button>
+      <button type="button" class="dhm-settings-btn" onclick="window.dhmToggleSettings && window.dhmToggleSettings()" title="Settings">
+        <i class="fa fa-cog"></i>
+      </button>
+    </div>
+  </div>
+
+  <div id="dhm-settings-panel" class="dhm-settings-panel">
+    <div class="dhm-settings-row">
+      <span class="dhm-settings-label">History retention:</span>
+      <input type="number" id="dhm-retention-input" class="dhm-settings-input" min="1" max="3650" value="90">
+      <span class="dhm-settings-note">days</span>
+      <button type="button" class="dhm-settings-save" onclick="window.dhmSaveSettings && window.dhmSaveSettings()">Save</button>
+      <span id="dhm-settings-msg" class="dhm-settings-note"></span>
+    </div>
+    <div class="dhm-settings-note" style="margin-top:6px">Data older than this is automatically deleted. Current DB: <span id="dhm-db-info">—</span></div>
   </div>
 
   <div class="dhm-summary">
@@ -1314,8 +1448,17 @@ foreach ($rawLines as $line) {
   $stmt->reset(); $stmt->execute();
 }
 
-// Prune rows older than 90 days
-$cutoff = $ts - (90 * 86400);
+// Prune rows older than configured retention period (default 90 days)
+$cfgPath = '/boot/config/plugins/disk-health-monitor/settings.cfg';
+$retentionDays = 90;
+if (file_exists($cfgPath)) {
+  foreach (file($cfgPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+    if (preg_match('/^RETENTION_DAYS\s*=\s*(\d+)$/', trim($line), $m)) {
+      $retentionDays = max(1, (int)$m[1]);
+    }
+  }
+}
+$cutoff = $ts - ($retentionDays * 86400);
 $db->exec("DELETE FROM snapshots WHERE ts < $cutoff");
 $db->close();
 PHPEOF
@@ -1332,13 +1475,25 @@ header('Cache-Control: no-cache');
 
 $serial = trim($_GET['serial'] ?? '');
 $range  = $_GET['range'] ?? '7d';
+$info   = !empty($_GET['info']);
+
+$dbPath = '/var/local/emhttp/plugins/disk-health-monitor/history.db';
+
+if ($info) {
+  if (!file_exists($dbPath)) { echo json_encode(['rowCount' => 0]); exit; }
+  $db = new SQLite3($dbPath, SQLITE3_OPEN_READONLY);
+  $db->busyTimeout(3000);
+  $count = (int)$db->querySingle('SELECT COUNT(*) FROM snapshots');
+  $db->close();
+  echo json_encode(['rowCount' => $count]);
+  exit;
+}
 
 if ($serial === '') { echo json_encode(['error' => 'serial required']); exit; }
 
 $ranges = ['24h' => 86400, '7d' => 604800, '30d' => 2592000, '90d' => 7776000];
 $seconds = $ranges[$range] ?? $ranges['7d'];
 
-$dbPath = '/var/local/emhttp/plugins/disk-health-monitor/history.db';
 if (!file_exists($dbPath)) {
   echo json_encode(['points' => [], 'delta' => null]);
   exit;
@@ -1414,6 +1569,50 @@ echo "history.php written"
 
   <FILE Run="/bin/bash">
     <INLINE><![CDATA[
+cat > /usr/local/emhttp/plugins/disk-health-monitor/include/settings.php << 'PHPEOF'
+<?php
+header('Content-Type: application/json');
+header('Cache-Control: no-cache');
+
+$cfgPath = '/boot/config/plugins/disk-health-monitor/settings.cfg';
+$defaults = ['RETENTION_DAYS' => 90];
+
+function readCfg($path, $defaults) {
+  $cfg = $defaults;
+  if (!file_exists($path)) return $cfg;
+  foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+    if (preg_match('/^([A-Z_]+)\s*=\s*(.+)$/', trim($line), $m)) {
+      $cfg[$m[1]] = $m[2];
+    }
+  }
+  return $cfg;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+  $body = json_decode(file_get_contents('php://input'), true);
+  if (!is_array($body)) { http_response_code(400); echo json_encode(['error' => 'invalid JSON']); exit; }
+
+  $days = isset($body['retentionDays']) ? (int)$body['retentionDays'] : null;
+  if ($days === null || $days < 1 || $days > 3650) {
+    http_response_code(400); echo json_encode(['error' => 'retentionDays must be 1–3650']); exit;
+  }
+
+  $dir = dirname($cfgPath);
+  if (!is_dir($dir)) mkdir($dir, 0755, true);
+  file_put_contents($cfgPath, "RETENTION_DAYS=$days\n");
+  echo json_encode(['ok' => true, 'retentionDays' => $days]);
+  exit;
+}
+
+$cfg = readCfg($cfgPath, $defaults);
+echo json_encode(['retentionDays' => (int)$cfg['RETENTION_DAYS']]);
+PHPEOF
+echo "settings.php written"
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
 echo "*/30 * * * * root /usr/bin/php /usr/local/emhttp/plugins/disk-health-monitor/include/collect.php >/dev/null 2>&1" \
   > /etc/cron.d/disk-health-monitor
 chmod 644 /etc/cron.d/disk-health-monitor
@@ -1425,6 +1624,8 @@ echo "Cron job installed"
     <INLINE><![CDATA[
 rm -rf /usr/local/emhttp/plugins/disk-health-monitor
 rm -f /etc/cron.d/disk-health-monitor
+rm -rf /var/local/emhttp/plugins/disk-health-monitor
+rm -rf /boot/config/plugins/disk-health-monitor
 echo "Disk Health Monitor removed."
 ]]></INLINE>
   </FILE>
