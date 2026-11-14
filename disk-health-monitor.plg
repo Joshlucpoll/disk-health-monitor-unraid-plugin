@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
   <!ENTITY name "Disk Health Monitor">
   <!ENTITY author "Joshlucpoll">
-  <!ENTITY version "2026.04.29">
+  <!ENTITY version "2026.05.03">
   <!ENTITY description "Real-time disk health overview with SMART data, temps, alerts, and pool/array usage">
   <!ENTITY category "System Monitoring">
   <!ENTITY pluginURL "https://raw.githubusercontent.com/Joshlucpoll/disk-health-monitor-unraid-plugin/main/disk-health-monitor.plg">
@@ -20,6 +20,18 @@
   </DESCRIPTION>
 
   <CHANGES>
+    ###2026.05.03
+    - Historic disk health tracking via SQLite database
+    - Automatic snapshots every 30 minutes via cron job
+    - Inline sparkline trend chart on each disk card (7-day health score)
+    - Delta badge showing health score change over the period
+    - Expandable per-disk history panel with full SVG chart
+    - Time-range selector: 24h / 7d / 30d / 90d
+    - Comparison table: current vs. period-start metrics
+    - Baseline tracking from earliest recorded snapshot
+    - 90-day automatic data retention and pruning
+    - Disk identity tracked by serial number (survives slot moves)
+
     ###2026.04.29
     - Initial public release
     - Real-time disk health dashboard on Unraid Main page
@@ -35,6 +47,12 @@
 mkdir -p /usr/local/emhttp/plugins/disk-health-monitor/css
 mkdir -p /usr/local/emhttp/plugins/disk-health-monitor/js
 mkdir -p /usr/local/emhttp/plugins/disk-health-monitor/include
+mkdir -p /var/local/emhttp/plugins/disk-health-monitor
+mkdir -p /boot/config/plugins/disk-health-monitor
+# Write default config only if it doesn't already exist
+if [ ! -f /boot/config/plugins/disk-health-monitor/settings.cfg ]; then
+  echo "RETENTION_DAYS=90" > /boot/config/plugins/disk-health-monitor/settings.cfg
+fi
 echo "Directories ready"
 ]]></INLINE>
   </FILE>
@@ -254,6 +272,186 @@ cat > /usr/local/emhttp/plugins/disk-health-monitor/css/style.css << 'CSSEOF'
 @media (max-width: 900px) { .dhm-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); } }
 @media (max-width: 600px) { .dhm-grid { grid-template-columns: 1fr; } .dhm-metrics { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 400px) { .dhm-metrics { grid-template-columns: 1fr; } }
+
+/* ── History / sparkline additions ── */
+
+/* Sparkline row inside the health bar section */
+.dhm-sparkline-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+}
+.dhm-sparkline {
+  flex: 1;
+  height: 20px;
+  min-width: 0;
+}
+.dhm-sparkline svg { display: block; width: 100%; height: 20px; }
+
+/* Delta badge: ↑ +5 /7d */
+.dhm-delta {
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.dhm-delta-up   { background: rgba(220,53,69,.15);  color: #f44336; }
+.dhm-delta-down { background: rgba(40,167,69,.15);  color: #28a745; }
+.dhm-delta-flat { background: rgba(128,128,128,.12); color: var(--dhm-muted, rgba(128,128,128,.8)); }
+
+/* History toggle button */
+.dhm-history-btn {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 4px 0;
+  font-size: 11px;
+  text-align: center;
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.3));
+  border-radius: 3px;
+  background: var(--dhm-row, rgba(128,128,128,.08));
+  color: var(--dhm-muted, rgba(128,128,128,.8));
+  cursor: pointer;
+}
+.dhm-history-btn:hover { opacity: .8; }
+
+/* Expandable history panel — sits in its own full-width row */
+.dhm-history-panel {
+  display: none;
+  grid-column: 1 / -1;
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.25));
+  border-radius: 4px;
+  background: var(--dhm-bg, transparent);
+  padding: 12px 14px;
+  margin-top: -4px;
+}
+.dhm-history-panel.open { display: block; }
+
+.dhm-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dhm-history-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--dhm-text, inherit);
+}
+.dhm-range-btns { display: flex; gap: 4px; }
+.dhm-range-btn {
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.3));
+  border-radius: 3px;
+  background: var(--dhm-row, rgba(128,128,128,.08));
+  color: var(--dhm-muted, rgba(128,128,128,.8));
+  cursor: pointer;
+}
+.dhm-range-btn.active {
+  background: var(--dhm-accent, #0066cc);
+  color: #fff;
+  border-color: var(--dhm-accent, #0066cc);
+}
+.dhm-range-btn:hover:not(.active) { opacity: .8; }
+
+/* Chart area */
+.dhm-chart-wrap {
+  width: 100%;
+  overflow: hidden;
+  border-radius: 3px;
+}
+.dhm-chart-wrap svg { display: block; width: 100%; height: 120px; overflow: visible; }
+
+/* Baseline comparison table */
+.dhm-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-top: 10px;
+}
+.dhm-history-table th {
+  text-align: left;
+  font-weight: 700;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  color: var(--dhm-muted, rgba(128,128,128,.8));
+  padding: 4px 6px 4px 0;
+  border-bottom: 1px solid var(--dhm-border, rgba(128,128,128,.2));
+}
+.dhm-history-table td {
+  padding: 4px 6px 4px 0;
+  border-bottom: 1px solid var(--dhm-border, rgba(128,128,128,.1));
+  color: var(--dhm-text, inherit);
+}
+.dhm-history-table td:last-child { font-weight: 600; }
+.dhm-history-loading {
+  text-align: center;
+  padding: 20px;
+  font-size: 12px;
+  color: var(--dhm-muted, rgba(128,128,128,.7));
+}
+
+/* Settings panel */
+.dhm-settings-btn {
+  padding: 4px 9px;
+  font-size: 11px;
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.3));
+  border-radius: 3px;
+  background: var(--dhm-row, rgba(128,128,128,.1));
+  color: var(--dhm-muted, rgba(128,128,128,.8));
+  cursor: pointer;
+  line-height: 1.4;
+  margin-left: 4px;
+}
+.dhm-settings-btn:hover { opacity: .8; }
+.dhm-settings-panel {
+  display: none;
+  background: var(--dhm-row, rgba(128,128,128,.08));
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.2));
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.dhm-settings-panel.open { display: block; }
+.dhm-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.dhm-settings-label { color: var(--dhm-text, inherit); font-weight: 600; }
+.dhm-settings-input {
+  width: 70px;
+  padding: 3px 6px;
+  font-size: 12px;
+  border: 1px solid var(--dhm-border, rgba(128,128,128,.3));
+  border-radius: 3px;
+  background: var(--dhm-bg, transparent);
+  color: var(--dhm-text, inherit);
+  text-align: center;
+}
+.dhm-settings-save {
+  padding: 3px 10px;
+  font-size: 11px;
+  border: 1px solid var(--dhm-accent, #0066cc);
+  border-radius: 3px;
+  background: var(--dhm-accent, #0066cc);
+  color: #fff;
+  cursor: pointer;
+}
+.dhm-settings-save:hover { opacity: .85; }
+.dhm-settings-note {
+  font-size: 11px;
+  color: var(--dhm-muted, rgba(128,128,128,.7));
+}
 CSSEOF
 echo "CSS written"
 ]]></INLINE>
@@ -380,11 +578,172 @@ cat > /usr/local/emhttp/plugins/disk-health-monitor/js/app.js << 'JSEOF'
     applyFilter();
   };
 
+  /* ── SVG helpers ── */
+
+  function sparklineSvg(points, lineColor) {
+    if (!points || points.length < 2) {
+      return '<svg viewBox="0 0 60 20" preserveAspectRatio="none">'
+        +'<line x1="0" y1="10" x2="60" y2="10" stroke="'+lineColor+'" stroke-width="1.5" stroke-dasharray="3,2" opacity=".4"/>'
+        +'</svg>';
+    }
+    var W=60, H=20, pad=2;
+    var scores = points.map(function(p){ return p.healthScore; });
+    var mn=Math.min.apply(null,scores), mx=Math.max.apply(null,scores);
+    var rng = mx - mn || 1;
+    var coords = scores.map(function(v,i){
+      var x = pad + (i/(scores.length-1)) * (W - 2*pad);
+      var y = H - pad - ((v-mn)/rng) * (H - 2*pad);
+      return x.toFixed(1)+','+y.toFixed(1);
+    });
+    return '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'
+      +'<polyline points="'+coords.join(' ')+'" fill="none" stroke="'+lineColor+'" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>'
+      +'</svg>';
+  }
+
+  function chartSvg(points) {
+    if (!points || points.length < 2) {
+      return '<svg viewBox="0 0 400 120" preserveAspectRatio="none">'
+        +'<text x="200" y="65" text-anchor="middle" font-size="12" fill="rgba(128,128,128,.5)">Not enough data yet</text>'
+        +'</svg>';
+    }
+    var W=400, H=100, padL=28, padR=8, padT=6, padB=18;
+    var iW = W - padL - padR, iH = H - padT - padB;
+    var scores = points.map(function(p){ return p.healthScore; });
+    var mn = Math.max(0, Math.min.apply(null,scores) - 5);
+    var mx = Math.min(100, Math.max.apply(null,scores) + 5);
+    var rng = mx - mn || 1;
+    var n = points.length;
+    function px(i){ return padL + (i/(n-1)) * iW; }
+    function py(v){ return padT + iH - ((v-mn)/rng) * iH; }
+    var gridHtml = '';
+    [0,25,50,75,100].forEach(function(v){
+      if (v < mn || v > mx) return;
+      var y = py(v);
+      gridHtml += '<line x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+y.toFixed(1)+'"'
+        +' stroke="rgba(128,128,128,.15)" stroke-width="1"/>'
+        +'<text x="'+(padL-3)+'" y="'+(y+3.5).toFixed(1)+'" text-anchor="end" font-size="8" fill="rgba(128,128,128,.6)">'+v+'</text>';
+    });
+    var tsLabels = '';
+    function fmtDate(ts){ var d=new Date(ts*1000); return (d.getMonth()+1)+'/'+(d.getDate()); }
+    [[0,padL],[Math.floor((n-1)/2),px(Math.floor((n-1)/2))],[n-1,W-padR]].forEach(function(pair){
+      var i=pair[0], x=pair[1];
+      tsLabels += '<text x="'+x.toFixed(1)+'" y="'+(H-2)+'" text-anchor="middle" font-size="8" fill="rgba(128,128,128,.6)">'+fmtDate(points[i].ts)+'</text>';
+    });
+    var areaCoords = points.map(function(p,i){ return px(i).toFixed(1)+','+py(p.healthScore).toFixed(1); });
+    var areaPath = 'M'+padL+','+(padT+iH)+' L'+areaCoords.join(' L')+' L'+(W-padR)+','+(padT+iH)+' Z';
+    var lineCoords = points.map(function(p,i){ return px(i).toFixed(1)+','+py(p.healthScore).toFixed(1); });
+    var minSc = Math.min.apply(null,scores);
+    var strokeCol = minSc >= 85 ? '#28a745' : minSc >= 60 ? '#e6a817' : '#dc3545';
+    var fillCol   = minSc >= 85 ? 'rgba(40,167,69,.12)' : minSc >= 60 ? 'rgba(230,168,23,.12)' : 'rgba(220,53,69,.12)';
+    return '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'
+      +gridHtml
+      +'<path d="'+areaPath+'" fill="'+fillCol+'"/>'
+      +'<polyline points="'+lineCoords.join(' ')+'" fill="none" stroke="'+strokeCol+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
+      +tsLabels
+      +'</svg>';
+  }
+
+  function deltaBadge(delta) {
+    if (delta === null || delta === undefined) return '';
+    if (delta > 0) return '<span class="dhm-delta dhm-delta-down">↑ +'+delta+' pts</span>';
+    if (delta < 0) return '<span class="dhm-delta dhm-delta-up">↓ '+delta+' pts</span>';
+    return '<span class="dhm-delta dhm-delta-flat">→ Stable</span>';
+  }
+
+  function renderHistoryPanel(panelEl, data, serial, activeRange) {
+    var points = data.points || [];
+    var delta  = data.delta;
+    var base   = data.baseline;
+    var rangeBtns = ['24h','7d','30d','90d'].map(function(r){
+      return '<button class="dhm-range-btn'+(r===activeRange?' active':'')+'" '
+        +'onclick="dhmHistoryRange(\''+serial+'\',\''+r+'\',this)">'+r+'</button>';
+    }).join('');
+    var tableRows = '';
+    var now  = points.length ? points[points.length-1] : null;
+    var then = points.length ? points[0] : null;
+    function row(label, fn) {
+      var curr = now  ? fn(now)  : '—';
+      var prev = then ? fn(then) : '—';
+      tableRows += '<tr><td>'+label+'</td><td>'+curr+'</td><td>'+prev+'</td></tr>';
+    }
+    row('Health Score',      function(p){ return p.healthScore+'%'; });
+    row('Temperature',       function(p){ return p.temperature != null ? p.temperature+'°C' : 'N/A'; });
+    row('Reallocated Sectors', function(p){ return p.reallocSectors; });
+    row('Pending Sectors',   function(p){ return p.pendingSectors; });
+    row('Uncorrectable',     function(p){ return p.uncorrectable; });
+    var baseRow = '';
+    if (base && base.ts) {
+      var bd = new Date(base.ts*1000);
+      var bf = (bd.getMonth()+1)+'/'+bd.getDate()+'/'+bd.getFullYear();
+      baseRow = '<tr style="font-style:italic;opacity:.7"><td>Baseline ('+bf+')</td><td>'+base.healthScore+'%</td><td>—</td></tr>';
+    }
+    var emptyMsg = points.length < 2 ? '<div class="dhm-history-loading" style="padding:10px 0">Collecting data — snapshots run every 30 min.</div>' : '';
+    panelEl.innerHTML =
+      '<div class="dhm-history-header">'
+      +  '<span class="dhm-history-title"><i class="fa fa-line-chart"></i> Health Score History</span>'
+      +  '<div class="dhm-range-btns">'+rangeBtns+'</div>'
+      +'</div>'
+      +'<div class="dhm-chart-wrap">'+chartSvg(points)+'</div>'
+      +emptyMsg
+      +'<table class="dhm-history-table">'
+      +  '<thead><tr><th>Metric</th><th>Now</th><th>'+activeRange+' ago</th></tr></thead>'
+      +  '<tbody>'+tableRows+baseRow+'</tbody>'
+      +'</table>';
+  }
+
+  function loadHistory(serial, panelEl, range) {
+    range = range || '7d';
+    panelEl.innerHTML = '<div class="dhm-history-loading"><i class="fa fa-spinner fa-spin"></i> Loading history...</div>';
+    var x = new XMLHttpRequest();
+    x.open('GET', '/plugins/disk-health-monitor/include/history.php?serial='+encodeURIComponent(serial)+'&range='+range+'&_='+Date.now());
+    x.onload = function() {
+      if (x.status !== 200) { panelEl.innerHTML = '<div class="dhm-history-loading">History unavailable.</div>'; return; }
+      var data; try { data = JSON.parse(x.responseText); } catch(e) { panelEl.innerHTML = '<div class="dhm-history-loading">Parse error.</div>'; return; }
+      renderHistoryPanel(panelEl, data, serial, range);
+    };
+    x.onerror = function() { panelEl.innerHTML = '<div class="dhm-history-loading">Cannot reach history API.</div>'; };
+    x.send();
+  }
+
+  window.dhmHistoryRange = function(serial, range, btn) {
+    var panel = btn.closest('.dhm-history-panel');
+    if (!panel) return;
+    loadHistory(serial, panel, range);
+  };
+
+  window.dhmToggleHistory = function(btn) {
+    var card  = btn.closest('.dhm-card');
+    var grid  = card ? card.closest('.dhm-grid') : null;
+    if (!grid) return;
+    var serial  = card.getAttribute('data-serial');
+    var panelId = 'dhm-hp-' + serial.replace(/[^a-z0-9]/gi,'_');
+    var existing = document.getElementById(panelId);
+    if (existing) {
+      if (existing.classList.contains('open')) {
+        existing.classList.remove('open');
+        btn.textContent = '▼ History';
+      } else {
+        existing.classList.add('open');
+        btn.textContent = '▲ History';
+        loadHistory(serial, existing, '7d');
+      }
+      return;
+    }
+    var panel = document.createElement('div');
+    panel.className = 'dhm-history-panel open';
+    panel.id = panelId;
+    grid.appendChild(panel);
+    btn.textContent = '▲ History';
+    loadHistory(serial, panel, '7d');
+  };
+
   /* Card HTML */
   function cardHtml(d) {
     var sc = d.healthScore||0, c = cls(sc);
     var logical = d.logicalName || ('/dev/'+d.name);
-    var sub = '/dev/'+d.name+(d.model && d.model!=='Unknown' ? ' \u2014 '+d.model : '');
+    var sub = '/dev/'+d.name+(d.model && d.model!=='Unknown' ? ' — '+d.model : '');
+    var serial = d.serial || d.name;
+    var safeId = serial.replace(/[^a-z0-9]/gi,'_');
     var attrHtml = '';
     if (d.smartAttributes) {
       Object.keys(d.smartAttributes).slice(0,5).forEach(function(k){
@@ -397,8 +756,8 @@ cat > /usr/local/emhttp/plugins/disk-health-monitor/js/app.js << 'JSEOF'
       alertHtml += '<div class="dhm-alert dhm-alert-'+a.level+'"><strong>'+a.title+':</strong> '+a.message+'</div>';
     });
     var usedStr = d.capacity > 0 ? fmtBytes(d.used||0)+' <span class="dhm-metric-unit">('+( d.usagePercent||0)+'%)</span>' : 'N/A';
-    var tempStr = d.temperature != null ? d.temperature+'<span class="dhm-metric-unit">\u00b0C</span>' : 'N/A';
-    return '<div class="dhm-card '+c+'">'
+    var tempStr = d.temperature != null ? d.temperature+'<span class="dhm-metric-unit">°C</span>' : 'N/A';
+    return '<div class="dhm-card '+c+'" data-serial="'+serial+'">'
       +'<div class="dhm-card-head">'
       +  '<div><div class="dhm-disk-logical">'+logical+'</div><div class="dhm-disk-sub">'+sub+'</div></div>'
       +  '<span class="dhm-badge '+c+'">'+lbl(sc)+'</span>'
@@ -412,10 +771,37 @@ cat > /usr/local/emhttp/plugins/disk-health-monitor/js/app.js << 'JSEOF'
       +'<div class="dhm-health-wrap">'
       +  '<div class="dhm-health-top"><span>Health Score</span><strong>'+sc+'%</strong></div>'
       +  '<div class="dhm-bar"><div class="dhm-bar-fill '+c+'" style="width:'+sc+'%"></div></div>'
+      +  '<div class="dhm-sparkline-row"><div class="dhm-sparkline" id="dhm-sp-'+safeId+'"></div><span class="dhm-delta dhm-delta-flat" id="dhm-dl-'+safeId+'"></span></div>'
       +'</div>'
       +(attrHtml?'<div class="dhm-smart"><div class="dhm-smart-title">SMART Attributes</div>'+attrHtml+'</div>':'')
       +alertHtml
+      +'<button class="dhm-history-btn" onclick="window.dhmToggleHistory(this)">▼ History</button>'
       +'</div>';
+  }
+
+  function loadSparklines(data) {
+    data.forEach(function(d) {
+      var serial = d.serial || d.name;
+      var safeId = serial.replace(/[^a-z0-9]/gi,'_');
+      var sparkEl = document.getElementById('dhm-sp-'+safeId);
+      var deltaEl = document.getElementById('dhm-dl-'+safeId);
+      if (!sparkEl) return;
+      var x = new XMLHttpRequest();
+      x.open('GET', '/plugins/disk-health-monitor/include/history.php?serial='+encodeURIComponent(serial)+'&range=7d&_='+Date.now());
+      x.onload = function() {
+        if (x.status !== 200) return;
+        var resp; try { resp = JSON.parse(x.responseText); } catch(e){ return; }
+        var points = resp.points || [];
+        var sc = d.healthScore || 0;
+        var strokeCol = sc >= 85 ? '#28a745' : sc >= 60 ? '#e6a817' : '#dc3545';
+        sparkEl.innerHTML = sparklineSvg(points, strokeCol);
+        if (deltaEl && resp.delta) {
+          var badge = deltaBadge(resp.delta.healthScore);
+          deltaEl.outerHTML = badge || '<span class="dhm-delta dhm-delta-flat" id="dhm-dl-'+safeId+'"></span>';
+        }
+      };
+      x.send();
+    });
   }
 
   /* Render — one .dhm-group per section, each with its own grid */
@@ -424,15 +810,12 @@ cat > /usr/local/emhttp/plugins/disk-health-monitor/js/app.js << 'JSEOF'
     if (!wrap) return;
     if (!data.length) { wrap.innerHTML='<div class="dhm-state">No physical disks detected.</div>'; return; }
 
-    // Group, preserving server-defined order
     var order = [], map = {};
     data.forEach(function(d){
       var key = d.groupKey || 'unassigned';
       if (!map[key]) { map[key]={label:d.groupLabel||'Unassigned Devices', disks:[]}; order.push(key); }
       map[key].disks.push(d);
     });
-
-    // Sort disks within each group naturally by logicalName
     order.forEach(function(key){ map[key].disks.sort(naturalSort); });
 
     var html = '';
@@ -450,6 +833,7 @@ cat > /usr/local/emhttp/plugins/disk-health-monitor/js/app.js << 'JSEOF'
     var s=function(id,v){var el=document.getElementById(id);if(el)el.textContent=v;};
     s('dhm-total',data.length); s('dhm-healthy',ok); s('dhm-warning',warn); s('dhm-critical',crit);
     applyFilter();
+    loadSparklines(data);
   }
 
   function load() {
@@ -466,6 +850,63 @@ cat > /usr/local/emhttp/plugins/disk-health-monitor/js/app.js << 'JSEOF'
     x.onerror=function(){wrap.innerHTML='<div class="dhm-state dhm-error">Cannot reach API.</div>';};
     x.send();
   }
+
+  /* ── Settings panel ── */
+
+  window.dhmToggleSettings = function() {
+    var panel = document.getElementById('dhm-settings-panel');
+    if (!panel) return;
+    panel.classList.toggle('open');
+    if (panel.classList.contains('open')) loadSettingsValues();
+  };
+
+  function loadSettingsValues() {
+    var x = new XMLHttpRequest();
+    x.open('GET', '/plugins/disk-health-monitor/include/settings.php?_='+Date.now());
+    x.onload = function() {
+      if (x.status !== 200) return;
+      var data; try { data = JSON.parse(x.responseText); } catch(e){ return; }
+      var inp = document.getElementById('dhm-retention-input');
+      if (inp && data.retentionDays) inp.value = data.retentionDays;
+    };
+    x.send();
+    // Also fetch DB row count for the info line
+    var y = new XMLHttpRequest();
+    y.open('GET', '/plugins/disk-health-monitor/include/history.php?info=1&_='+Date.now());
+    y.onload = function() {
+      if (y.status !== 200) return;
+      var data; try { data = JSON.parse(y.responseText); } catch(e){ return; }
+      var el = document.getElementById('dhm-db-info');
+      if (el && data.rowCount !== undefined) {
+        el.textContent = data.rowCount.toLocaleString() + ' snapshot rows';
+      }
+    };
+    y.send();
+  }
+
+  window.dhmSaveSettings = function() {
+    var inp = document.getElementById('dhm-retention-input');
+    var msg = document.getElementById('dhm-settings-msg');
+    if (!inp) return;
+    var days = parseInt(inp.value, 10);
+    if (isNaN(days) || days < 1 || days > 3650) {
+      if (msg) { msg.textContent = 'Enter 1–3650 days.'; msg.style.color = '#f44336'; }
+      return;
+    }
+    if (msg) { msg.textContent = 'Saving…'; msg.style.color = ''; }
+    var x = new XMLHttpRequest();
+    x.open('POST', '/plugins/disk-health-monitor/include/settings.php');
+    x.setRequestHeader('Content-Type', 'application/json');
+    x.onload = function() {
+      if (x.status === 200) {
+        if (msg) { msg.textContent = 'Saved.'; msg.style.color = '#28a745'; setTimeout(function(){ if(msg) msg.textContent=''; }, 2500); }
+      } else {
+        if (msg) { msg.textContent = 'Error saving.'; msg.style.color = '#f44336'; }
+      }
+    };
+    x.onerror = function() { if (msg) { msg.textContent = 'Network error.'; msg.style.color = '#f44336'; } };
+    x.send(JSON.stringify({ retentionDays: days }));
+  };
 
   window.dhmRefresh = load;
   if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',load);}else{load();}
@@ -550,6 +991,14 @@ function buildDeviceMap() {
     ];
   }
   return $map;
+}
+
+/* Disk serial number */
+function diskSerial($d) {
+  foreach (r("smartctl -i $d") as $l) {
+    if (preg_match('/Serial Number\s*:\s*(.+)/i',$l,$m)) return trim($m[1]);
+  }
+  return basename($d);
 }
 
 /* Disk model */
@@ -729,6 +1178,7 @@ foreach($rawLines as $line){
 
   $disks[]=[
     'name'           =>$name,
+    'serial'         =>diskSerial($p[0]),
     'logicalName'    =>$logicalName,
     'sortKey'        =>$sortKey,
     'group'          =>$group,
@@ -778,9 +1228,25 @@ Tag="fa-hdd"
       <i class="fa fa-hdd-o"></i>
       <span>Disk Health Monitor</span>
     </div>
-    <button type="button" class="dhm-refresh-btn" onclick="window.dhmRefresh && window.dhmRefresh()">
-      <i class="fa fa-refresh"></i> Refresh
-    </button>
+    <div style="display:flex;gap:4px;align-items:center">
+      <button type="button" class="dhm-refresh-btn" onclick="window.dhmRefresh && window.dhmRefresh()">
+        <i class="fa fa-refresh"></i> Refresh
+      </button>
+      <button type="button" class="dhm-settings-btn" onclick="window.dhmToggleSettings && window.dhmToggleSettings()" title="Settings">
+        <i class="fa fa-cog"></i>
+      </button>
+    </div>
+  </div>
+
+  <div id="dhm-settings-panel" class="dhm-settings-panel">
+    <div class="dhm-settings-row">
+      <span class="dhm-settings-label">History retention:</span>
+      <input type="number" id="dhm-retention-input" class="dhm-settings-input" min="1" max="3650" value="90">
+      <span class="dhm-settings-note">days</span>
+      <button type="button" class="dhm-settings-save" onclick="window.dhmSaveSettings && window.dhmSaveSettings()">Save</button>
+      <span id="dhm-settings-msg" class="dhm-settings-note"></span>
+    </div>
+    <div class="dhm-settings-note" style="margin-top:6px">Data older than this is automatically deleted. Current DB: <span id="dhm-db-info">—</span></div>
   </div>
 
   <div class="dhm-summary">
@@ -813,16 +1279,353 @@ echo "Page written"
     <INLINE><![CDATA[
 chmod -R 755 /usr/local/emhttp/plugins/disk-health-monitor
 find /usr/local/emhttp/plugins/disk-health-monitor -type f -exec chmod 644 {} \;
+chmod 755 /var/local/emhttp/plugins/disk-health-monitor 2>/dev/null || true
 if ! command -v smartctl >/dev/null 2>&1; then
   installplug smartmontools 2>/dev/null || pacman -S --noconfirm smartmontools 2>/dev/null || true
 fi
-echo "Disk Health Monitor v2026.04.29 installed."
+echo "Disk Health Monitor v2026.05.03 installed."
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+mkdir -p /var/local/emhttp/plugins/disk-health-monitor
+cat > /usr/local/emhttp/plugins/disk-health-monitor/include/collect.php << 'PHPEOF'
+<?php
+/*
+ * Cron snapshot collector — runs every 30 minutes via /etc/cron.d/disk-health-monitor.
+ * Writes one row per physical disk into a SQLite database.
+ */
+
+$dbPath = '/var/local/emhttp/plugins/disk-health-monitor/history.db';
+$db = new SQLite3($dbPath);
+$db->busyTimeout(5000);
+$db->exec('PRAGMA journal_mode=WAL');
+$db->exec('CREATE TABLE IF NOT EXISTS snapshots (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts              INTEGER NOT NULL,
+  disk_name       TEXT    NOT NULL,
+  disk_serial     TEXT    NOT NULL,
+  logical_name    TEXT,
+  health_score    INTEGER,
+  temperature     INTEGER,
+  power_on_hours  INTEGER,
+  realloc_sectors INTEGER,
+  pending_sectors INTEGER,
+  uncorrectable   INTEGER,
+  cmd_timeouts    INTEGER,
+  capacity        INTEGER,
+  used_bytes      INTEGER
+)');
+$db->exec('CREATE INDEX IF NOT EXISTS idx_serial_ts ON snapshots (disk_serial, ts)');
+
+function r($c){ exec($c.' 2>/dev/null',$o); return $o; }
+
+function diskSerial($d) {
+  foreach (r("smartctl -i $d") as $l) {
+    if (preg_match('/Serial Number\s*:\s*(.+)/i',$l,$m)) return trim($m[1]);
+  }
+  return basename($d);
+}
+
+function smartData($d) {
+  $r=['temperature'=>null,'powerOnHours'=>0,'reallocSectors'=>0,'pendingSectors'=>0,
+      'cmdTimeout'=>0,'uncorrectable'=>0,'criticalWarning'=>0,'status'=>'unknown','attrs'=>[]];
+  foreach (r("smartctl -a $d") as $l) {
+    if (preg_match('/SMART overall-health self-assessment test result\s*:\s*(\w+)/i',$l,$m))
+      $r['status'] = (strtoupper(trim($m[1]))==='PASSED') ? 'passed' : 'failed';
+    if (preg_match('/^Temperature\s*:\s*([\d,]+)\s*Celsius/i',$l,$m))
+      $r['temperature']=(int)str_replace(',','',$m[1]);
+    if (preg_match('/^Power On Hours\s*:\s*([\d,]+)/i',$l,$m))
+      $r['powerOnHours']=(int)str_replace(',','',$m[1]);
+    if (preg_match('/^Critical Warning\s*:\s*(0x[\da-fA-F]+|\d+)/i',$l,$m))
+      $r['criticalWarning']=hexdec($m[1]);
+    if (preg_match('/^\s*(\d+)\s+(\S+)\s+\S+\s+\d+\s+\d+\s+\d+\s+\S+\s+\S+\s+\S+\s+(\d+)/',$l,$m)) {
+      $id=(int)$m[1]; $val=(int)$m[3];
+      if($id===190||$id===194) $r['temperature']=$val;
+      if($id===9)              $r['powerOnHours']=$val;
+      if($id===5)              $r['reallocSectors']=$val;
+      if($id===197)            $r['pendingSectors']=$val;
+      if($id===188)            $r['cmdTimeout']=$val;
+      if($id===198)            $r['uncorrectable']=$val;
+    }
+  }
+  return $r;
+}
+
+function healthScore($sm) {
+  $s=100; $t=$sm['temperature'];
+  if($t!==null){if($t>65)$s-=20;elseif($t>55)$s-=10;elseif($t>50)$s-=5;}
+  if($sm['reallocSectors']>0) $s-=min(30,$sm['reallocSectors']);
+  if($sm['pendingSectors']>0) $s-=min(40,$sm['pendingSectors']*5);
+  if($sm['uncorrectable']>0)  $s-=15;
+  if($sm['cmdTimeout']>0)     $s-=10;
+  if($sm['criticalWarning']>0)$s-=20;
+  if($sm['powerOnHours']>0)   $s-=min(20,(int)($sm['powerOnHours']/10000)*2);
+  if($sm['status']==='failed')$s=min(50,$s);
+  return max(0,min(100,$s));
+}
+
+function buildDeviceMap() {
+  $map=[]; $path='/var/local/emhttp/disks.ini';
+  if (!file_exists($path)) return $map;
+  $ini=@parse_ini_file($path,true,INI_SCANNER_RAW);
+  if (!$ini) return $map;
+  foreach ($ini as $section => $v) {
+    $dev=basename(trim($v['device']??'','"'));
+    $name=trim($v['name']??'','"');
+    $type=strtolower(trim($v['type']??'','"'));
+    if($dev==='') continue;
+    $group=($type==='parity'||$type==='data')?'array':($type==='cache'?'pool':($type==='flash'?'flash':'unassigned'));
+    $poolName=($type==='cache')?preg_replace('/\d+$/','',($name?:$section)):null;
+    $map[$dev]=['logicalName'=>$name?:('/dev/'.$dev),'group'=>$group,'poolName'=>$poolName];
+  }
+  return $map;
+}
+
+function diskUsage($devBasename,$group,$poolName,$logicalName) {
+  $iniPath='/var/local/emhttp/disks.ini';
+  if (file_exists($iniPath)) {
+    $ini=@parse_ini_file($iniPath,true,INI_SCANNER_RAW);
+    if($ini){
+      $sect=null;
+      foreach($ini as $k=>$v){if(!empty($v['device'])&&trim($v['device'],'"')===$devBasename){$sect=$v;break;}}
+      if((!$sect||!isset($sect['fsSize'])||$sect['fsSize']==='')&&$group==='pool'&&$poolName){
+        foreach($ini as $v){$n=trim($v['name']??'','"');$rp=preg_replace('/\d+$/','',$n?:'none');if($rp===$poolName&&isset($v['fsSize'])&&$v['fsSize']!==''){$sect=$v;break;}}
+      }
+      if($sect&&isset($sect['fsSize'])&&isset($sect['fsFree'])&&$sect['fsSize']!==''){
+        $fst=trim($sect['fsSize'],'"');$ffr=trim($sect['fsFree'],'"');
+        if(is_numeric($fst)&&is_numeric($ffr)&&(int)$fst>0){$fsize=(int)$fst*1024;$ffree=(int)$ffr*1024;return[$fsize,$fsize-$ffree];}
+      }
+    }
+  }
+  $mps=[];
+  if($group==='array'){if(stripos($logicalName,'parity')===0)return[0,0];$slug=strtolower(preg_replace('/\s+/','',$logicalName));$mps[]='/mnt/'.$slug;}
+  elseif($group==='pool'&&$poolName){$mps[]='/mnt/'.strtolower($poolName);}
+  elseif($group==='flash'){$mps[]='/boot';}
+  foreach($mps as $mp){if(!is_dir($mp))continue;foreach(r("df -B1 -P ".escapeshellarg($mp))as $i=>$l){if($i===0)continue;$p=preg_split('/\s+/',trim($l));if(count($p)>=3)return[(int)$p[1],(int)$p[2]];}}
+  return [0,0];
+}
+
+$ts = time();
+$deviceMap = buildDeviceMap();
+$rawLines = []; exec('lsblk -dpb -o NAME,SIZE,TYPE 2>/dev/null', $rawLines);
+
+$stmt = $db->prepare('INSERT INTO snapshots
+  (ts,disk_name,disk_serial,logical_name,health_score,temperature,power_on_hours,
+   realloc_sectors,pending_sectors,uncorrectable,cmd_timeouts,capacity,used_bytes)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
+
+foreach ($rawLines as $line) {
+  $p = preg_split('/\s+/', trim($line), 3);
+  if (count($p)<3 || $p[2]!=='disk') continue;
+  $name = basename($p[0]);
+  if (preg_match('/^(loop|dm-|sr|zd)/', $name)) continue;
+
+  $info     = $deviceMap[$name] ?? null;
+  $logical  = $info['logicalName'] ?? ('/dev/'.$name);
+  $group    = $info['group']       ?? 'unassigned';
+  $poolName = $info['poolName']    ?? null;
+
+  $sm        = smartData($p[0]);
+  $serial    = diskSerial($p[0]);
+  $sc        = healthScore($sm);
+  [$cap,$used] = diskUsage($name, $group, $poolName, $logical);
+
+  $stmt->bindValue(1, $ts,                  SQLITE3_INTEGER);
+  $stmt->bindValue(2, $name,                SQLITE3_TEXT);
+  $stmt->bindValue(3, $serial,              SQLITE3_TEXT);
+  $stmt->bindValue(4, $logical,             SQLITE3_TEXT);
+  $stmt->bindValue(5, $sc,                  SQLITE3_INTEGER);
+  $stmt->bindValue(6, $sm['temperature'],   SQLITE3_INTEGER);
+  $stmt->bindValue(7, $sm['powerOnHours'],  SQLITE3_INTEGER);
+  $stmt->bindValue(8, $sm['reallocSectors'],SQLITE3_INTEGER);
+  $stmt->bindValue(9, $sm['pendingSectors'],SQLITE3_INTEGER);
+  $stmt->bindValue(10,$sm['uncorrectable'], SQLITE3_INTEGER);
+  $stmt->bindValue(11,$sm['cmdTimeout'],    SQLITE3_INTEGER);
+  $stmt->bindValue(12,(int)$p[1],           SQLITE3_INTEGER);
+  $stmt->bindValue(13,$used,                SQLITE3_INTEGER);
+  $stmt->reset(); $stmt->execute();
+}
+
+// Prune rows older than configured retention period (default 90 days)
+$cfgPath = '/boot/config/plugins/disk-health-monitor/settings.cfg';
+$retentionDays = 90;
+if (file_exists($cfgPath)) {
+  foreach (file($cfgPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+    if (preg_match('/^RETENTION_DAYS\s*=\s*(\d+)$/', trim($line), $m)) {
+      $retentionDays = max(1, (int)$m[1]);
+    }
+  }
+}
+$cutoff = $ts - ($retentionDays * 86400);
+$db->exec("DELETE FROM snapshots WHERE ts < $cutoff");
+$db->close();
+PHPEOF
+echo "collect.php written"
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+cat > /usr/local/emhttp/plugins/disk-health-monitor/include/history.php << 'PHPEOF'
+<?php
+header('Content-Type: application/json');
+header('Cache-Control: no-cache');
+
+$serial = trim($_GET['serial'] ?? '');
+$range  = $_GET['range'] ?? '7d';
+$info   = !empty($_GET['info']);
+
+$dbPath = '/var/local/emhttp/plugins/disk-health-monitor/history.db';
+
+if ($info) {
+  if (!file_exists($dbPath)) { echo json_encode(['rowCount' => 0]); exit; }
+  $db = new SQLite3($dbPath, SQLITE3_OPEN_READONLY);
+  $db->busyTimeout(3000);
+  $count = (int)$db->querySingle('SELECT COUNT(*) FROM snapshots');
+  $db->close();
+  echo json_encode(['rowCount' => $count]);
+  exit;
+}
+
+if ($serial === '') { echo json_encode(['error' => 'serial required']); exit; }
+
+$ranges = ['24h' => 86400, '7d' => 604800, '30d' => 2592000, '90d' => 7776000];
+$seconds = $ranges[$range] ?? $ranges['7d'];
+
+if (!file_exists($dbPath)) {
+  echo json_encode(['points' => [], 'delta' => null]);
+  exit;
+}
+
+$db   = new SQLite3($dbPath, SQLITE3_OPEN_READONLY);
+$db->busyTimeout(3000);
+$now  = time();
+$from = $now - $seconds;
+
+$stmt = $db->prepare(
+  'SELECT ts, health_score, temperature, power_on_hours,
+          realloc_sectors, pending_sectors, uncorrectable, cmd_timeouts,
+          capacity, used_bytes
+   FROM snapshots
+   WHERE disk_serial = ? AND ts >= ?
+   ORDER BY ts ASC'
+);
+$stmt->bindValue(1, $serial, SQLITE3_TEXT);
+$stmt->bindValue(2, $from,   SQLITE3_INTEGER);
+$res  = $stmt->execute();
+
+$points = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+  $points[] = [
+    'ts'             => (int)$row['ts'],
+    'healthScore'    => (int)$row['health_score'],
+    'temperature'    => $row['temperature'] !== null ? (int)$row['temperature'] : null,
+    'powerOnHours'   => (int)$row['power_on_hours'],
+    'reallocSectors' => (int)$row['realloc_sectors'],
+    'pendingSectors' => (int)$row['pending_sectors'],
+    'uncorrectable'  => (int)$row['uncorrectable'],
+    'cmdTimeouts'    => (int)$row['cmd_timeouts'],
+  ];
+}
+
+// Compute delta: latest vs earliest point in range
+$delta = null;
+if (count($points) >= 2) {
+  $first = $points[0];
+  $last  = $points[count($points) - 1];
+  $delta = [
+    'healthScore'  => $last['healthScore']  - $first['healthScore'],
+    'temperature'  => ($last['temperature'] !== null && $first['temperature'] !== null)
+                       ? $last['temperature'] - $first['temperature'] : null,
+    'reallocSectors' => $last['reallocSectors'] - $first['reallocSectors'],
+  ];
+}
+
+// Also fetch the single earliest point ever for long-term baseline
+$base = $db->querySingle(
+  "SELECT health_score, temperature, realloc_sectors, ts
+   FROM snapshots WHERE disk_serial = " . $db->escapeString($serial) .
+  " ORDER BY ts ASC LIMIT 1", true
+);
+
+$db->close();
+
+echo json_encode([
+  'points'   => $points,
+  'delta'    => $delta,
+  'baseline' => $base ? [
+    'ts'           => (int)$base['ts'],
+    'healthScore'  => (int)$base['health_score'],
+    'temperature'  => $base['temperature'] !== null ? (int)$base['temperature'] : null,
+    'reallocSectors' => (int)$base['realloc_sectors'],
+  ] : null,
+], JSON_UNESCAPED_SLASHES);
+PHPEOF
+echo "history.php written"
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+cat > /usr/local/emhttp/plugins/disk-health-monitor/include/settings.php << 'PHPEOF'
+<?php
+header('Content-Type: application/json');
+header('Cache-Control: no-cache');
+
+$cfgPath = '/boot/config/plugins/disk-health-monitor/settings.cfg';
+$defaults = ['RETENTION_DAYS' => 90];
+
+function readCfg($path, $defaults) {
+  $cfg = $defaults;
+  if (!file_exists($path)) return $cfg;
+  foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+    if (preg_match('/^([A-Z_]+)\s*=\s*(.+)$/', trim($line), $m)) {
+      $cfg[$m[1]] = $m[2];
+    }
+  }
+  return $cfg;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+  $body = json_decode(file_get_contents('php://input'), true);
+  if (!is_array($body)) { http_response_code(400); echo json_encode(['error' => 'invalid JSON']); exit; }
+
+  $days = isset($body['retentionDays']) ? (int)$body['retentionDays'] : null;
+  if ($days === null || $days < 1 || $days > 3650) {
+    http_response_code(400); echo json_encode(['error' => 'retentionDays must be 1–3650']); exit;
+  }
+
+  $dir = dirname($cfgPath);
+  if (!is_dir($dir)) mkdir($dir, 0755, true);
+  file_put_contents($cfgPath, "RETENTION_DAYS=$days\n");
+  echo json_encode(['ok' => true, 'retentionDays' => $days]);
+  exit;
+}
+
+$cfg = readCfg($cfgPath, $defaults);
+echo json_encode(['retentionDays' => (int)$cfg['RETENTION_DAYS']]);
+PHPEOF
+echo "settings.php written"
+]]></INLINE>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE><![CDATA[
+echo "*/30 * * * * root /usr/bin/php /usr/local/emhttp/plugins/disk-health-monitor/include/collect.php >/dev/null 2>&1" \
+  > /etc/cron.d/disk-health-monitor
+chmod 644 /etc/cron.d/disk-health-monitor
+echo "Cron job installed"
 ]]></INLINE>
   </FILE>
 
   <FILE Run="/bin/bash" Method="remove">
     <INLINE><![CDATA[
 rm -rf /usr/local/emhttp/plugins/disk-health-monitor
+rm -f /etc/cron.d/disk-health-monitor
+rm -rf /var/local/emhttp/plugins/disk-health-monitor
+rm -rf /boot/config/plugins/disk-health-monitor
 echo "Disk Health Monitor removed."
 ]]></INLINE>
   </FILE>
